@@ -1,0 +1,40 @@
+import matplotlib.pyplot as plt
+import pandas as pd
+
+def get_df():
+    from finance_bot import database as _database
+    conn = _database.conn
+    return pd.read_sql("SELECT * FROM operations", conn)
+
+async def report_dates(msg, start, end):
+    df = get_df()
+    df = df[(df.date >= start) & (df.date <= end)]
+
+    if df.empty:
+        await msg.answer("Нет данных в этот период")
+        return
+
+    total = df["amount"].sum()
+    await msg.answer(f"Итого за период: {total}")
+
+    chart = df.groupby("category")["amount"].sum()
+    chart.plot(kind="bar")
+    plt.savefig("chart_period.png")
+    plt.clf()
+
+    await msg.answer_photo(photo=open("chart_period.png", "rb"))
+
+async def report_chart(msg, cat):
+    df = get_df()
+    df = df[df.category == cat]
+
+    if df.empty:
+        await msg.answer(f"Нет данных по {cat}")
+        return
+
+    chart = df.groupby("date")["amount"].sum()
+    chart.plot(kind="bar")
+    plt.savefig("chart_cat.png")
+    plt.clf()
+
+    await msg.answer_photo(photo=open("chart_cat.png", "rb"))

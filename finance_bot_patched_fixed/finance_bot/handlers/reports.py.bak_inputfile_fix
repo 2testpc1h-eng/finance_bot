@@ -1,0 +1,292 @@
+from aiogram import Router, F
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    FSInputFile,
+)
+from finance_bot.keyboards.reports_kb import (
+    reports_main_kb,
+    overview_kb_for_type,
+    back_only_kb,
+)
+from finance_bot.utils import parse_period, display_date
+from finance_bot import database_helpers as dbh
+
+import matplotlib.pyplot as plt
+import tempfile
+import os
+
+router = Router()
+
+# Контексты
+USER_REPORT_STATE: dict[int, dict] = {}
+USER_GRAPH_STATE: dict[int, dict] = {}
+CLEAR_CONTEXT: dict[int, dict] = {}
+
+
+# ---------- МЕНЮ ОТЧЁТОВ ----------
+
+@router.message(F.text.in_(("📊 Отчет", "📊 Отчёт", "Отчеты", "Отчёты")))
+async def open_reports_menu(message: Message):
+    await message.answer(
+        "📊 Выберите тип отчёта:",
+        reply_markup=reports_main_kb()
+    )
+
+
+@router.callback_query(F.data.startswith("report|"))
+async def handle_report_menu(call: CallbackQuery):
+    await call.answer()
+    _, action = call.data.split("|", 1)
+
+    if action in ("income", "expense", "balance"):
+        USER_REPORT_STATE[call.from_user.id] = {"type": action}
+        await call.message.edit_text(
+            "Введите период:\n"
+            "DD.MM.YYYY - DD.MM.YYYY\n"
+            "или напишите «всё»"
+        )
+
+
+@router.message(lambda msg: msg.from_user.id in USER_REPORT_STATE)
+async def handle_report_period(message: Message):
+    user_id = message.from_user.id
+    state = USER_REPORT_STATE.pop(user_id)
+
+    text = message.text.strip().lower()
+    if text in ("всё", "все", "всё время", "все время"):
+        period = None
+    else:
+        start, end = parse_period(message.text)
+        if not start:
+            await message.answer("❌ Неверный формат периода")
+            return
+        period = (start, end)
+
+    rtype = state["type"]
+    CLEAR_CONTEXT[user_id] = {"type": rtype, "period": period}
+
+    if rtype in ("income", "expense"):
+        sums = dbh.sums_by_categories(user_id, rtype, period)
+        if not sums:
+            await message.answer("Нет данных за период.")
+            return
+
+        total = sum(sums.values())
+        lines = [
+            f"📊 Отчёт по {'доходам' if rtype == 'income' else 'расходам'}",
+            f"Период: {display_date(period[0])} — {display_date(period[1])}" if period else "Период: всё время",
+            ""
+        ]
+
+        for c, v in sums.items():
+            lines.append(f"• {c}: {v:.2f} ₽")
+
+        lines.append(f"\nИтого: {total:.2f} ₽")
+
+        await message.answer(
+            "\n".join(lines),
+            reply_markup=overview_kb_for_type(rtype)
+        )
+
+    elif rtype == "balance":
+        inc = dbh.get_total_by_type(user_id, "income", period)
+        exp = dbh.get_total_by_type(user_id, "expense", period)
+        await message.answer(
+            "💰 Баланс\n"
+            f"{'Период: всё время' if not period else f'Период: {display_date(period[0])} — {display_date(period[1])}'}\n\n"
+            f"Доходы: {inc:.2f} ₽\n"
+            f"Расходы: {exp:.2f} ₽\n"
+            f"Итого: {inc - exp:.2f} ₽"
+        )
+
+
+# ---------- СУММА ВСЕХ ----------
+
+@router.callback_query(F.data.startswith("sum_all|"))
+async def sum_all_handler(call: CallbackQuery):
+    await call.answer()
+    user_id = call.from_user.id
+    _, rtype = call.data.split("|", 1)
+
+    total = dbh.get_total_by_type(user_id, rtype, None)
+    title = "доходов" if rtype == "income" else "расходов"
+
+    await call.message.edit_text(
+        f"💰 Сумма всех {title}:\n\n<b>{total:.2f} ₽</b>",
+        reply_markup=back_only_kb(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "reports_back")
+async def reports_back(call: CallbackQuery):
+    await call.answer()
+    await call.message.edit_text(
+        "📊 Выберите тип отчёта:",
+        reply_markup=reports_main_kb()
+    )
+
+
+# ---------- ОЧИСТКА ДАННЫХ ----------
+
+@router.callback_query(F.data.startswith("clear|"))
+async def clear_menu(call: CallbackQuery):
+    await call.answer()
+    _, rtype = call.data.split("|", 1)
+    uid = call.from_user.id
+    ctx = CLEAR_CONTEXT.get(uid)
+
+    if ctx and ctx.get("type") == rtype and ctx.get("period") is not None:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="Очистить данные за выбранный период",
+                callback_data=f"clear_confirm|{rtype}|period"
+            )],
+            [InlineKeyboardButton(
+                text="Очистить данные за всё время",
+                callback_data=f"clear_confirm|{rtype}|all"
+            )],
+            [InlineKeyboardButton(text="Отмена", callback_data="reports_back")]
+        ])
+        await call.message.edit_text("Выберите, что удалить:", reply_markup=kb)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="Очистить данные за всё время",
+            callback_data=f"clear_confirm|{rtype}|all"
+        )],
+        [InlineKeyboardButton(text="Отмена", callback_data="reports_back")]
+    ])
+    await call.message.edit_text("Подтвердите удаление:", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("clear_confirm|"))
+async def clear_confirm(call: CallbackQuery):
+    await call.answer()
+    user_id = call.from_user.id
+    _, rtype, mode = call.data.split("|", 2)
+    ctx = CLEAR_CONTEXT.get(user_id, {})
+
+    if mode == "period":
+        period = ctx.get("period")
+        if not period:
+            await call.message.edit_text("❌ Период не найден.")
+            return
+
+        deleted = dbh.delete_by_type_and_period(user_id, rtype, period)
+        CLEAR_CONTEXT.pop(user_id, None)
+
+        await call.message.edit_text(
+            f"✅ Удалено записей за период: {deleted}",
+            reply_markup=reports_main_kb()
+        )
+        return
+
+    if mode == "all":
+        deleted = dbh.delete_by_type_all_time(user_id, rtype)
+        CLEAR_CONTEXT.pop(user_id, None)
+
+        await call.message.edit_text(
+            f"✅ Удалено записей (всё время): {deleted}",
+            reply_markup=reports_main_kb()
+        )
+
+
+# ---------- ГРАФИК ----------
+
+@router.message(F.text.in_(("📈 График", "График")))
+async def graph_menu(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Доходы", callback_data="graph|income")],
+        [InlineKeyboardButton(text="📉 Расходы", callback_data="graph|expense")],
+        [InlineKeyboardButton(text="📝 Общий график", callback_data="graph|both")],
+    ])
+    await message.answer("📈 Что строим?", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("graph|"))
+async def graph_type(call: CallbackQuery):
+    await call.answer()
+    USER_GRAPH_STATE[call.from_user.id] = {"type": call.data.split("|")[1]}
+    await call.message.edit_text(
+        "Введите период:\nDD.MM.YYYY - DD.MM.YYYY\nили «всё»"
+    )
+
+
+@router.message(lambda msg: msg.from_user.id in USER_GRAPH_STATE)
+async def build_graph(message: Message):
+    user_id = message.from_user.id
+    state = USER_GRAPH_STATE.pop(user_id)
+
+    text = message.text.strip().lower()
+    if text in ("всё", "все", "всё время", "все время"):
+        period = None
+    else:
+        start, end = parse_period(message.text)
+        if not start:
+            await message.answer("❌ Неверный формат периода")
+            return
+        period = (start, end)
+
+    plt.figure(figsize=(9, 5))
+
+    # строим линии: доходы и/или расходы
+    plotted = False
+
+    if state["type"] in ("income", "both"):
+        d_inc, v_inc = dbh.get_daily_totals(user_id, "income", period)
+        if d_inc:
+            # конвертируем строки дат в datetime для корректной визуализации
+            try:
+                import pandas as _pd
+                d_inc_dt = _pd.to_datetime(d_inc)
+            except Exception:
+                d_inc_dt = d_inc
+            plt.plot(d_inc_dt, v_inc, label="Доходы")
+            plotted = True
+
+    if state["type"] in ("expense", "both"):
+        d_exp, v_exp = dbh.get_daily_totals(user_id, "expense", period)
+        if d_exp:
+            try:
+                import pandas as _pd
+                d_exp_dt = _pd.to_datetime(d_exp)
+            except Exception:
+                d_exp_dt = d_exp
+            plt.plot(d_exp_dt, v_exp, label="Расходы")
+            plotted = True
+
+    if not plotted:
+        await message.answer("Нет данных для выбранного периода.")
+        return
+
+    plt.grid(True)
+    plt.legend()
+    plt.xlabel("Дата")
+    plt.ylabel("Сумма")
+    plt.title("Финансовая динамика")
+    plt.gcf().autofmt_xdate()
+    plt.tight_layout()
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    tmp.close()
+    plt.savefig(tmp.name)
+    plt.close()
+
+    try:
+        # откроем файл явно в бинарном режиме, чтобы он гарантированно закрылся до удаления
+        with open(tmp.name, "rb") as fh:
+            await message.answer_photo(
+                photo=fh,
+                caption="📈 Финансовый график"
+            )
+    finally:
+        # Удаляем временный файл (если он всё ещё существует)
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass

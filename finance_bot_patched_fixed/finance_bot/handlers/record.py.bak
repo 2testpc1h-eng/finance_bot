@@ -1,0 +1,108 @@
+from database import add_record
+from datetime import date
+from aiogram import Router, F
+from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from states import RecordStates
+
+
+router = Router()
+
+INCOME_CATS = {
+    "Продажи": [],
+    "Стипендия": [],
+    "Подарки": [],
+    "Зарплата": ["Наличные", "Карта"]
+}
+
+EXPENSE_CATS = {
+    "Еда": [],
+    "Жилье": [],
+    "Развлечения": [],
+    "Здоровье": [],
+    "Подарки": [],
+    "Транспорт": ["Такси", "Общественный транспорт"]
+}
+
+def make_inline_cats(type_str):
+    kb = []
+    cats = INCOME_CATS if type_str == "income" else EXPENSE_CATS
+    for c in cats:
+        kb.append([InlineKeyboardButton(text=c, callback_data=f"rec_cat|{c}")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def make_inline_subs(cat):
+    kb = []
+    parent = {**INCOME_CATS, **EXPENSE_CATS}
+    for s in parent.get(cat, []):
+        kb.append([InlineKeyboardButton(text=s, callback_data=f"rec_sub|{s}")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+@router.message(F.text == "➕ Доход")
+async def inc_start(msg: Message, state: FSMContext):
+    await state.clear()
+    await state.update_data(type="income")
+    await msg.answer("Выберите категорию:", reply_markup=make_inline_cats("income"))
+    await state.set_state(RecordStates.waiting_for_category)
+
+
+@router.message(F.text == "➖ Расход")
+async def exp_start(msg: Message, state: FSMContext):
+    await state.clear()
+    await state.update_data(type="expense")
+    await msg.answer("Выберите категорию:", reply_markup=make_inline_cats("expense"))
+    await state.set_state(RecordStates.waiting_for_category)
+
+
+@router.callback_query(F.data.startswith("rec_cat|"))
+async def cat_chosen(call: CallbackQuery, state: FSMContext):
+    cat = call.data.split("|")[1]
+    await state.update_data(category=cat)
+    await call.message.delete()
+
+    parent = {**INCOME_CATS, **EXPENSE_CATS}
+    if parent.get(cat):
+        await call.message.answer(
+            "Выберите подкатегорию:",
+            reply_markup=make_inline_subs(cat)
+        )
+        await state.set_state(RecordStates.waiting_for_subcategory)
+    else:
+        await call.message.answer("Введите сумму:")
+        await state.set_state(RecordStates.waiting_for_amount)
+
+
+@router.callback_query(F.data.startswith("rec_sub|"))
+async def sub_chosen(call: CallbackQuery, state: FSMContext):
+    sub = call.data.split("|")[1]
+    await state.update_data(subcategory=sub)
+    await call.message.delete()
+
+    await call.message.answer("Введите сумму:")
+    await state.set_state(RecordStates.waiting_for_amount)
+
+
+@router.message(RecordStates.waiting_for_amount)
+async def amount(msg: Message, state: FSMContext):
+    try:
+        amt = float(msg.text.replace(",", "."))
+    except ValueError:
+        return await msg.answer("Введите число, например: 1500")
+
+    data = await state.get_data()
+
+    add_record(
+        data["type"],
+        data["category"],
+        data.get("subcategory"),
+        amt,
+        date.today().isoformat()
+    )
+
+    await msg.answer(
+        f"✅ Запись сохранена\n"
+        f"📅 {date.today().isoformat()}\n"
+        f"💰 {amt}"
+    )
+
+    await state.clear()

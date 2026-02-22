@@ -1,0 +1,39 @@
+tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    tmp.close()
+    plt.savefig(tmp.name)
+    plt.close()
+
+    try:
+        # Попробуем отправить как FSInputFile (из пути) — это безопасно для валидации.
+        from aiogram.types import FSInputFile
+        await message.answer_photo(
+            photo=FSInputFile(tmp.name),
+            caption="📈 Финансовый график"
+        )
+    except Exception:
+        # fallback: отправляем путь как строку (aiogram тоже принимает str)
+        try:
+            await message.answer_photo(photo=tmp.name, caption="📈 Финансовый график")
+        except Exception as e:
+            # если отправка провалится, уведомим пользователя
+            await message.answer(f"Ошибка отправки графика: {e}")
+
+    # Не удаляем файл мгновенно — даём aiogram несколько секунд, чтобы освободить дескриптор на Windows.
+    import asyncio
+    async def _del_later(path):
+        await asyncio.sleep(2)
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+    try:
+        asyncio.create_task(_del_later(tmp.name))
+    except Exception:
+        # если asyncio.create_task недоступна в текущем контексте, попытка удалить сразу (плохо, но fallback)
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+        except Exception:
+            pass

@@ -1,0 +1,26 @@
+from finance_bot.utils import display_date
+from finance_bot import database_helpers as dbh
+
+
+async def send_save_confirmation(message, op_type, category, amount, date_obj):
+    user_id = message.from_user.id
+
+    # текущая сумма ДО добавления записи
+    current_sum = dbh.sum_by_type_and_category(
+        user_id=user_id,
+        type_=op_type,
+        category=category,
+        period=None
+    )
+
+    new_total = current_sum + float(amount)
+    date_str = display_date(date_obj)
+
+    reply = (
+        "✅ Запись сохранена\n"
+        f"📅 {date_str}\n"
+        f"💰 {current_sum:.2f} + {float(amount):.2f}\n\n"
+        f"Итого: {new_total:.2f}р"
+    )
+
+    await message.answer(reply)
