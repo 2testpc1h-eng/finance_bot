@@ -30,13 +30,9 @@ pip install aiogram==2.25.1 python-dotenv matplotlib pandas
 venv\Scripts\activate
 python -m finance_bot.bot
 
-
-📦 Итоговый набор зависимостей (под твой проект)
-
+Итоговый набор зависимостей (под твой проект)
 Запомни или сохрани:
-
 pip install aiogram==3.4.1 python-dotenv matplotlib pandas
-
 
 Если хочешь, можешь создать requirements.txt:
 
